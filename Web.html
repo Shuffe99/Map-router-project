@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Running Route Planner</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #map { height: 75vh; width: 100%; }
+    #controls {
+      padding: 10px;
+      background: #f4f4f4;
+      border-top: 1px solid #ccc;
+    }
+    input, button { margin: 5px; padding: 5px; }
+    label { margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="controls">
+    <p><b>Route Info:</b> <span id="route-info">Click on the map to start adding points</span></p>
+    <label>Pace (min/km): 
+      <input type="text" id="pace" placeholder="mm:ss" />
+    </label>
+    <label>Time (h:mm:ss): 
+      <input type="text" id="time" placeholder="h:mm:ss" />
+    </label>
+    <br>
+    <button id="undo">Undo Last Point</button>
+    <button id="clear">Clear Route</button>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([55.6761, 12.5683], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let waypoints = [];
+    let totalDistance = 0; 
+    let routeSegments = [];
+    let markers = [];
+
+    let lastChanged = null; // "pace" or "time"
+
+    map.on('click', async function(e) {
+      const point = [e.latlng.lng, e.latlng.lat];
+      waypoints.push(point);
+
+      const marker = L.circleMarker(e.latlng, {radius: 5, color: 'red'}).addTo(map);
+      markers.push(marker);
+
+      if (waypoints.length > 1) {
+        const start = waypoints[waypoints.length - 2];
+        const end = waypoints[waypoints.length - 1];
+
+        const url = `https://api.openrouteservice.org/v2/directions/foot-walking?api_key=eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRhZGE5ZDMxMzFkMTQxNDc5OTFjZDdjNTQ4MjhhYjdlIiwiaCI6Im11cm11cjY0In0=&start=${start[0]},${start[1]}&end=${end[0]},${end[1]}`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        const coords = data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        const line = L.polyline(coords, {color: 'blue'}).addTo(map);
+        routeSegments.push(line);
+
+        const segmentDistance = data.features[0].properties.segments[0].distance / 1000; 
+        totalDistance += segmentDistance;
+      }
+
+      updateUI();
+    });
+
+    function parsePace(paceStr) {
+      const parts = paceStr.split(":");
+      if (parts.length === 1) return parseFloat(parts[0]) || 0;
+      const minutes = parseInt(parts[0]) || 0;
+      const seconds = parseInt(parts[1]) || 0;
+      return minutes + seconds / 60;
+    }
+
+    function formatTime(totalMinutes) {
+      const totalSeconds = Math.round(totalMinutes * 60);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return `${hours}:${minutes.toString().padStart(2,"0")}:${seconds.toString().padStart(2,"0")}`;
+    }
+
+    function formatPace(pace) {
+      const totalSeconds = Math.round(pace * 60);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return `${minutes}:${seconds.toString().padStart(2,"0")}`;
+    }
+
+    function updateUI() {
+      document.getElementById("route-info").innerText = 
+        totalDistance > 0 ? `Distance: ${totalDistance.toFixed(2)} km` : "Click on the map to start adding points";
+
+      const paceInput = document.getElementById("pace");
+      const timeInput = document.getElementById("time");
+
+      if (totalDistance <= 0) {
+        if (lastChanged === "pace") timeInput.value = "";
+        if (lastChanged === "time") paceInput.value = "";
+        return;
+      }
+
+      if (lastChanged === "pace") {
+        const paceVal = parsePace(paceInput.value);
+        if (paceVal > 0) {
+          const totalMinutes = paceVal * totalDistance;
+          timeInput.value = formatTime(totalMinutes);
+        }
+      } else if (lastChanged === "time") {
+        const parts = timeInput.value.split(":").map(n => parseInt(n) || 0);
+        let totalMinutes = 0;
+        if (parts.length === 3) {
+          totalMinutes = parts[0] * 60 + parts[1] + parts[2] / 60;
+        } else if (parts.length === 2) {
+          totalMinutes = parts[0] + parts[1] / 60;
+        } else {
+          totalMinutes = parts[0];
+        }
+        if (totalMinutes > 0) {
+          const pace = totalMinutes / totalDistance;
+          paceInput.value = formatPace(pace);
+        }
+      }
+    }
+
+    document.getElementById("undo").addEventListener("click", () => {
+      if (waypoints.length === 0) return;
+
+      const marker = markers.pop();
+      if (marker) map.removeLayer(marker);
+
+      const line = routeSegments.pop();
+      if (line) {
+        totalDistance -= measureDistance(line.getLatLngs());
+        map.removeLayer(line);
+      }
+
+      waypoints.pop();
+      updateUI();
+    });
+
+    document.getElementById("clear").addEventListener("click", () => {
+      waypoints = [];
+      totalDistance = 0;
+      routeSegments.forEach(line => map.removeLayer(line));
+      markers.forEach(marker => map.removeLayer(marker));
+      routeSegments = [];
+      markers = [];
+      document.getElementById("pace").value = "";
+      document.getElementById("time").value = "";
+      lastChanged = null;
+      updateUI();
+    });
+
+    function measureDistance(latlngs) {
+      let dist = 0;
+      for (let i = 1; i < latlngs.length; i++) {
+        dist += map.distance(latlngs[i-1], latlngs[i]);
+      }
+      return dist / 1000;
+    }
+
+    document.getElementById("pace").addEventListener("input", () => {
+      lastChanged = "pace";
+      updateUI();
+    });
+    document.getElementById("time").addEventListener("input", () => {
+      lastChanged = "time";
+      updateUI();
+    });
+  </script>
+</body>
+</html>
